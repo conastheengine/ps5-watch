@@ -1,0 +1,49 @@
+# PS5 restock check (PlayStation Direct NL) every 15 min. Push alert via ntfy.
+# Requires repo secret NTFY_TOPIC.
+name: ps5-restock-check
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "Send a test alert (treat sold-out items as in stock)"
+        type: boolean
+        default: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check stock
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          TEST_ALERT: ${{ inputs.test_alert }}
+        run: |
+          UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+          MAXPRICE=55000
+          hits=""; hit_url=""; parsed=0
+          for url in \
+            "https://www.playstation.com/nl-nl/ps5/ghost-of-yotei-limited-edition-bundle-black/product/astro-bot-bundle/" \
+            "https://www.playstation.com/nl-nl/ps5/certified-refurbished-ps5-slim/"; do
+            curl -sL --max-time 30 -A "$UA" -H "Accept-Language: nl-NL,nl;q=0.9" "$url" -o page.html || { echo "fetch failed: $url"; continue; }
+            grep -oE 'price\\?":[0-9]+\},\\?"stockLevelStatus\\?":\\?"[A-Z_]+' page.html \
+              | sed -E 's/^[^0-9]*([0-9]+).*"([A-Z_]+)$/\1 \2/' | sort -u > found.txt || true
+            [ -s found.txt ] && parsed=1
+            echo "$url"; cat found.txt
+            while read -r price status; do
+              if { [ "$status" != "OUT_OF_STOCK" ] || [ "$TEST_ALERT" = "true" ]; } && [ "$price" -le "$MAXPRICE" ]; then
+                [ -z "$hit_url" ] && hit_url="$url"
+                hits="$hits EUR $((price/100)).$(printf '%02d' $((price%100))) ($status)"
+              fi
+            done < found.txt
+          done
+          if [ -n "$hits" ]; then
+            title="PS5 restock!"; [ "$TEST_ALERT" = "true" ] && title="TEST - PS5 restock!"
+            curl -s --max-time 15 -H "Title: $title" -H "Priority: urgent" -H "Tags: video_game" \
+              -H "Click: $hit_url" -d "In stock at PS Direct NL:$hits - buy now" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null
+            echo "ALERT SENT:$hits"
+          else
+            echo "No restock."
+          fi
+          [ "$parsed" = 1 ] || { echo "No stock data parsed - page layout may have changed"; exit 1; }
